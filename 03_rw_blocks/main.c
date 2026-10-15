@@ -1,170 +1,316 @@
 /*
-make generate
-
-make only_visualize
-
-make THREAD=1 POINTS=10000
+make THREAD=4
 
 make test
 
 Macbook Air M5 16 RAM / 512 GB / 10 CORES
-THREAD  POINTS       SEC
-1       100000000    17.34
-2       100000000    8.95
-3       100000000    6.03
-4       100000000    4.54
-5       100000000    3.93
-6       100000000    3.52
-7       100000000    3.15
-8       100000000    2.86
-9       100000000    2.62
-10      100000000    2.49
-11      100000000    2.48
-12      100000000    2.52
+
+THREAD  RWL          MY_RWL       RATIO
+1       20.2429      19.1770      0.95
+2       20.7948      19.2105      0.92
+3       21.7415      20.4452      0.94
+4       23.4967      20.8786      0.89
+5       23.8716      21.3524      0.89
+6       23.9935      21.5529      0.90
+7       24.5148      21.8597      0.89
+8       24.3115      21.4166      0.88
+9       24.7154      22.3614      0.90
+10      24.8281      21.7283      0.88
+11      24.6699      21.8366      0.89
+12      24.4915      22.3234      0.91
 */
 
 #include <stdio.h>
-#include <math.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include "my_rand.h"
 #include "timer.h"
+#include "my_rwlock.h"
 
-#define MAX_ITER 1000
+/* Random ints are less than MAX_KEY */
+const int MAX_KEY = 100000000;
 
-#define RE_MIN -2.0
-#define RE_MAX 2.0
-#define IM_MIN -2.0
-#define IM_MAX 2.0
 
-int g_nthreads;
-int g_npoints;
+/* Struct for list nodes */
+struct list_node_s {
+   int    data;
+   struct list_node_s* next;
+};
 
-double *g_points_re = NULL;
-double *g_points_im = NULL;
-int *g_result = NULL;
+/* Shared variables */
+struct      list_node_s* head = NULL;
+int         thread_count;
+int         total_ops;
+double      insert_percent;
+double      search_percent;
+double      delete_percent;
+my_rwlock_t    rwlock;
+pthread_mutex_t     count_mutex;
+int         member_count = 0, insert_count = 0, delete_count = 0;
 
-int is_in_mandelbrot(double c_re, double c_im)
-{
-    double z_re = 0.0;
-    double z_im = 0.0;
+/* Setup and cleanup */
+void        Usage(char* prog_name);
+void        Get_input(int* inserts_in_main_p);
 
-    for (int i = 0; i < MAX_ITER; i++)
-    {
-        double z_re2 = z_re * z_re;
-        double z_im2 = z_im * z_im;
+/* Thread function */
+void*       Thread_work(void* rank);
 
-        if (z_re2 + z_im2 > 4.0)
-            return 0;
+/* List operations */
+int         Insert(int value);
+void        Print(void);
+int         Member(int value);
+int         Delete(int value);
+void        Free_list(void);
+int         Is_empty(void);
 
-        double new_re = z_re2 - z_im2 + c_re;
-        double new_im = 2.0 * z_re * z_im + c_im;
-        z_re = new_re;
-        z_im = new_im;
-    }
+/*-----------------------------------------------------------------*/
+int main(int argc, char* argv[]) {
+   long i;
+   int key, success, attempts;
+   pthread_t* thread_handles;
+   int inserts_in_main;
+   unsigned seed = 1;
+   double start, finish;
 
-    return 1;
-}
+   if (argc != 2) Usage(argv[0]);
+   thread_count = strtol(argv[1],NULL,10);
 
-void *runner(void *arg)
-{
-    long rank = (long)arg;
-    int chunk = ceil((double)g_npoints / g_nthreads);
-    int start = rank * chunk;
-    int end = start + chunk;
+   Get_input(&inserts_in_main);
 
-    if (end > g_npoints)
-        end = g_npoints;
-    if (start > g_npoints)
-        start = g_npoints;
+   /* Try to insert inserts_in_main keys, but give up after */
+   /* 2*inserts_in_main attempts.                           */
+   i = attempts = 0;
+   while ( i < inserts_in_main && attempts < 2*inserts_in_main ) {
+      key = my_rand(&seed) % MAX_KEY;
+      success = Insert(key);
+      attempts++;
+      if (success) i++;
+   }
+   printf("Inserted %ld keys in empty list\n", i);
 
-    for (int i = start; i < end; i++)
-    {
-        g_result[i] = is_in_mandelbrot(g_points_re[i], g_points_im[i]);
-    }
+#  ifdef OUTPUT
+   printf("Before starting threads, list = \n");
+   Print();
+   printf("\n");
+#  endif
 
-    return NULL;
-}
+   thread_handles = malloc(thread_count*sizeof(pthread_t));
+   pthread_mutex_init(&count_mutex, NULL);
+   my_rwlock_init(&rwlock);
 
-int main(int argc, char *argv[])
-{
-    unsigned seed = 89;
-    pthread_t *thread_handles;
-    long total_found = 0;
-    double start, finish;
-    FILE *fp;
+   GET_TIME(start);
+   for (i = 0; i < thread_count; i++)
+      pthread_create(&thread_handles[i], NULL, Thread_work, (void*) i);
 
-    g_nthreads = strtol(argv[1], NULL, 10);
-    g_npoints = strtol(argv[2], NULL, 10);
+   for (i = 0; i < thread_count; i++)
+      pthread_join(thread_handles[i], NULL);
+   GET_TIME(finish);
+   printf("Elapsed time = %e seconds\n", finish - start);
+   printf("Total ops = %d\n", total_ops);
+   printf("member ops = %d\n", member_count);
+   printf("insert ops = %d\n", insert_count);
+   printf("delete ops = %d\n", delete_count);
 
-    g_points_re = malloc(g_npoints * sizeof(double));
-    g_points_im = malloc(g_npoints * sizeof(double));
-    g_result = malloc(g_npoints * sizeof(int));
-    if (!g_points_re || !g_points_im || !g_result)
-    {
-        fprintf(stderr, "malloc failed\n");
-        return 1;
-    }
+#  ifdef OUTPUT
+   printf("After threads terminate, list = \n");
+   Print();
+   printf("\n");
+#  endif
 
-    for (int i = 0; i < g_npoints; i++)
-    {
-        double a = my_drand(&seed);
-        double b = my_drand(&seed);
-        g_points_re[i] = RE_MIN + a * (RE_MAX - RE_MIN);
-        g_points_im[i] = IM_MIN + b * (IM_MAX - IM_MIN);
-        g_result[i] = 0;
-    }
+   Free_list();
+   my_rwlock_destroy(&rwlock);
+   pthread_mutex_destroy(&count_mutex);
+   free(thread_handles);
 
-    thread_handles = malloc(g_nthreads * sizeof(pthread_t));
-    if (!thread_handles)
-    {
-        fprintf(stderr, "malloc failed\n");
-        return 1;
-    }
+   return 0;
+}  /* main */
 
-    GET_TIME(start);
-    for (int i = 0; i < g_nthreads; i++)
-    {
-        if (pthread_create(&thread_handles[i], NULL, runner, (void *)(long)i) != 0)
-        {
-            fprintf(stderr, "pthread_create failed\n");
-            return 1;
-        }
-    }
 
-    for (int i = 0; i < g_nthreads; i++)
-    {
-        pthread_join(thread_handles[i], NULL);
-    }
-    GET_TIME(finish);
+/*-----------------------------------------------------------------*/
+void Usage(char* prog_name) {
+   fprintf(stderr, "usage: %s <thread_count>\n", prog_name);
+   exit(0);
+}  /* Usage */
 
-    printf("Elapsed time = %e seconds\n", finish - start);
+/*-----------------------------------------------------------------*/
+void Get_input(int* inserts_in_main_p) {
 
-    fp = fopen("output/data.csv", "w");
-    if (!fp)
-    {
-        fprintf(stderr, "cannot open output/data.csv for writing\n");
-        return 1;
-    }
-    fprintf(fp, "re,im\n");
-    for (int i = 0; i < g_npoints; i++)
-    {
-        if (g_result[i])
-        {
-            fprintf(fp, "%.17g,%.17g\n", g_points_re[i], g_points_im[i]);
-            total_found++;
-        }
-    }
-    fclose(fp);
+   printf("How many keys should be inserted in the main thread?\n");
+   scanf("%d", inserts_in_main_p);
+   printf("How many ops total should be executed?\n");
+   scanf("%d", &total_ops);
+   printf("Percent of ops that should be searches? (between 0 and 1)\n");
+   scanf("%lf", &search_percent);
+   printf("Percent of ops that should be inserts? (between 0 and 1)\n");
+   scanf("%lf", &insert_percent);
+   delete_percent = 1.0 - (search_percent + insert_percent);
+}  /* Get_input */
 
-    printf("Total points generated = %d\n", g_npoints);
-    printf("Points in Mandelbrot set = %ld\n", total_found);
-    printf("Written to output/data.csv\n");
+/*-----------------------------------------------------------------*/
+/* Insert value in correct numerical location into list */
+/* If value is not in list, return 1, else return 0 */
+int Insert(int value) {
+   struct list_node_s* curr = head;
+   struct list_node_s* pred = NULL;
+   struct list_node_s* temp;
+   int rv = 1;
 
-    free(g_points_re);
-    free(g_points_im);
-    free(g_result);
-    free(thread_handles);
+   while (curr != NULL && curr->data < value) {
+      pred = curr;
+      curr = curr->next;
+   }
 
-    return 0;
-}
+   if (curr == NULL || curr->data > value) {
+      temp = malloc(sizeof(struct list_node_s));
+      temp->data = value;
+      temp->next = curr;
+      if (pred == NULL)
+         head = temp;
+      else
+         pred->next = temp;
+   } else { /* value in list */
+      rv = 0;
+   }
+
+   return rv;
+}  /* Insert */
+
+/*-----------------------------------------------------------------*/
+void Print(void) {
+   struct list_node_s* temp;
+
+   printf("list = ");
+
+   temp = head;
+   while (temp != (struct list_node_s*) NULL) {
+      printf("%d ", temp->data);
+      temp = temp->next;
+   }
+   printf("\n");
+}  /* Print */
+
+
+/*-----------------------------------------------------------------*/
+int  Member(int value) {
+   struct list_node_s* temp;
+
+   temp = head;
+   while (temp != NULL && temp->data < value)
+      temp = temp->next;
+
+   if (temp == NULL || temp->data > value) {
+#     ifdef DEBUG
+      printf("%d is not in the list\n", value);
+#     endif
+      return 0;
+   } else {
+#     ifdef DEBUG
+      printf("%d is in the list\n", value);
+#     endif
+      return 1;
+   }
+}  /* Member */
+
+/*-----------------------------------------------------------------*/
+/* Deletes value from list */
+/* If value is in list, return 1, else return 0 */
+int Delete(int value) {
+   struct list_node_s* curr = head;
+   struct list_node_s* pred = NULL;
+   int rv = 1;
+
+   /* Find value */
+   while (curr != NULL && curr->data < value) {
+      pred = curr;
+      curr = curr->next;
+   }
+
+   if (curr != NULL && curr->data == value) {
+      if (pred == NULL) { /* first element in list */
+         head = curr->next;
+#        ifdef DEBUG
+         printf("Freeing %d\n", value);
+#        endif
+         free(curr);
+      } else {
+         pred->next = curr->next;
+#        ifdef DEBUG
+         printf("Freeing %d\n", value);
+#        endif
+         free(curr);
+      }
+   } else { /* Not in list */
+      rv = 0;
+   }
+
+   return rv;
+}  /* Delete */
+
+/*-----------------------------------------------------------------*/
+void Free_list(void) {
+   struct list_node_s* current;
+   struct list_node_s* following;
+
+   if (Is_empty()) return;
+   current = head;
+   following = current->next;
+   while (following != NULL) {
+#     ifdef DEBUG
+      printf("Freeing %d\n", current->data);
+#     endif
+      free(current);
+      current = following;
+      following = current->next;
+   }
+#  ifdef DEBUG
+   printf("Freeing %d\n", current->data);
+#  endif
+   free(current);
+}  /* Free_list */
+
+/*-----------------------------------------------------------------*/
+int  Is_empty(void) {
+   if (head == NULL)
+      return 1;
+   else
+      return 0;
+}  /* Is_empty */
+
+/*-----------------------------------------------------------------*/
+void* Thread_work(void* rank) {
+   long my_rank = (long) rank;
+   int i, val;
+   double which_op;
+   unsigned seed = my_rank + 1;
+   int my_member_count = 0, my_insert_count=0, my_delete_count=0;
+   int ops_per_thread = total_ops/thread_count;
+
+   for (i = 0; i < ops_per_thread; i++) {
+      which_op = my_drand(&seed);
+      val = my_rand(&seed) % MAX_KEY;
+      if (which_op < search_percent) {
+         my_rwlock_rdlock(&rwlock);
+         Member(val);
+         my_rwlock_unlock(&rwlock);
+         my_member_count++;
+      } else if (which_op < search_percent + insert_percent) {
+         my_rwlock_wrlock(&rwlock);
+         Insert(val);
+         my_rwlock_unlock(&rwlock);
+         my_insert_count++;
+      } else { /* delete */
+         my_rwlock_wrlock(&rwlock);
+         Delete(val);
+         my_rwlock_unlock(&rwlock);
+         my_delete_count++;
+      }
+   }  /* for */
+
+   pthread_mutex_lock(&count_mutex);
+   member_count += my_member_count;
+   insert_count += my_insert_count;
+   delete_count += my_delete_count;
+   pthread_mutex_unlock(&count_mutex);
+
+   return NULL;
+}  /* Thread_work */
