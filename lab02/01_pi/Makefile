@@ -11,7 +11,7 @@ REPEATS ?= 3
 
 .DEFAULT_GOAL := run
 
-.PHONY: build run bench plot visualize clean
+.PHONY: build run bench visualize clean plot
 
 build:
 	mkdir -p output
@@ -34,10 +34,10 @@ bench: build
 	done
 	@echo "Saved output/results.csv"
 
-plot:
+visualize: bench
 	"$(PYTHON)" tools.py
 
-visualize: bench
+plot:
 	"$(PYTHON)" tools.py
 
 clean:
