@@ -6,6 +6,6 @@ PYTHON ?= python3
 bootstrap:
 	$(PYTHON) -m venv $(VENV)
 	$(VENV)/bin/pip install --upgrade pip
-	$(VENV)/bin/pip install matplotlib numpy pandas
+	$(VENV)/bin/pip install matplotlib numpy pandas scipy
 	@echo
 	@echo "Done. Activate with: source $(VENV)/bin/activate"
